@@ -51,38 +51,53 @@ def save_last_msg_id(chat_id, message_id):
 # --- ХЕЛПЕР: Восстановление интерфейса ---
 def restore_user_interface(chat_id, session):
     """
-    Восстанавливает меню или форму ввода для пользователя
-    после того, как админ ответил на предыдущую заявку.
+    1. Удаляет старое сообщение с интерфейсом (если оно есть).
+    2. Отправляет уведомление или результат (опционально, это делается до вызова).
+    3. Рисует актуальное меню или поле ввода ВНИЗУ чата.
     """
     user_state = user_data.get(chat_id, {}).get('state')
     temp = user_data.get(chat_id, {}).get('temp', {})
     
+    # Пытаемся найти пользователя и удалить его старое сообщение-интерфейс
+    user = session.query(User).filter_by(user_id=chat_id).first()
+    if user and user.last_msg_id:
+        try:
+            bot.delete_message(chat_id, user.last_msg_id)
+        except Exception:
+            # Сообщение могло быть уже удалено или слишком старым
+            pass
+
     text_to_send = ""
     markup_to_send = None
 
-    # Сценарий 1: Пользователь вводил количество
+    # Сценарий 1: Пользователь в процессе ввода количества (начал новый заказ)
     if user_state == STATES['WAIT_QTY']:
         item = session.query(Storage).get(temp.get('item_id'))
         if item:
-            text_to_send = f"\nВыбрано: {item.item_name}\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
+            text_to_send = f"🔽 Продолжаем заказ:\n\nВыбрано: **{item.item_name}**\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
+        else:
+            # Если товар вдруг удалили, сбрасываем
+            user_data[chat_id] = {}
+            text_to_send = "Выберите категорию:"
+            markup_to_send = kb_categories(session)
 
     # Сценарий 2: Пользователь писал комментарий
     elif user_state == STATES['WAIT_COMMENT']:
         item = session.query(Storage).get(temp.get('item_id'))
         qty = temp.get('qty')
         if item:
-            text_to_send = f"\nТовар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
+            text_to_send = f"🔽 Продолжаем заказ:\n\nТовар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
 
-    # Сценарий 3: Пользователь просто в меню (или нет активного стейта)
+    # Сценарий 3: Пользователь просто в меню (или заказ завершен)
     else:
-        text_to_send = "Выберите категорию:"
+        text_to_send = "Что-нибудь ещё? Выберите категорию:"
         markup_to_send = kb_categories(session)
 
-    # Отправляем восстанавливающее сообщение
+    # Отправляем НОВОЕ сообщение вниз
     try:
-        msg = bot.send_message(chat_id, text_to_send, reply_markup=markup_to_send)
-        # Запоминаем новый ID
-        user = session.query(User).filter_by(user_id=chat_id).first()
+        msg = bot.send_message(chat_id, text_to_send, reply_markup=markup_to_send, parse_mode="Markdown")
+        
+        # Обновляем ID последнего сообщения в базе
         if user:
             user.last_msg_id = msg.message_id
             session.commit()
@@ -145,7 +160,7 @@ def cmd_add_item(message):
         return
 
     start_add_process(bot, message)
-    
+
 # Обработчик текста
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
@@ -288,16 +303,24 @@ def handle_all_callbacks(call):
             except:
                 pass
 
+        # Уведомление пользователю (ТЕКСТОВОЕ, без кнопок)
+        notification_text = ""
+        
         if action == "req_appr":
             if item.quantity >= req.req_count:
                 item.quantity -= req.req_count
                 req.is_approved = True
                 req.status = 'approved'
                 
-                bot.send_message(user.user_id, f"✅ Ваша заявка #{req.id} на **{item.item_name}** одобрена! Можете забирать.", parse_mode="Markdown")
+                # Формируем текст уведомления
+                notification_text = f"✅ Ваша заявка #{req.id} на **{item.item_name}** одобрена! Можете забирать."
                 
-                new_text = call.message.text + f"\n\n✅ ОДОБРЕНО администратором."
-                bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
+                # Обновляем сообщение у админа (убираем кнопки)
+                new_admin_text = call.message.text + f"\n\n✅ ОДОБРЕНО администратором."
+                try:
+                    bot.edit_message_text(new_admin_text, chat_id, call.message.message_id, reply_markup=None)
+                except: pass
+                
             else:
                 bot.answer_callback_query(call.id, "Мало товара!")
                 session.close()
@@ -307,15 +330,27 @@ def handle_all_callbacks(call):
             req.is_approved = False
             req.status = 'rejected'
             
-            bot.send_message(user.user_id, f"⛔ Ваша заявка #{req.id} на **{item.item_name}** отклонена.", parse_mode="Markdown")
+            notification_text = f"⛔ Ваша заявка #{req.id} на **{item.item_name}** отклонена."
             
-            new_text = call.message.text + f"\n\n⛔ ОТКЛОНЕНО администратором."
-            bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
+            new_admin_text = call.message.text + f"\n\n⛔ ОТКЛОНЕНО администратором."
+            try:
+                bot.edit_message_text(new_admin_text, chat_id, call.message.message_id, reply_markup=None)
+            except: pass
 
         session.commit()
-        
-        # ВОССТАНАВЛИВАЕМ ИНТЕРФЕЙС ЮЗЕРА
-        restore_user_interface(user.user_id, session)
+
+        # --- ЛОГИКА UX ДЛЯ ПОЛЬЗОВАТЕЛЯ ---
+        if notification_text:
+            try:
+                # 1. Просто отправляем уведомление (оно упадет в историю)
+                bot.send_message(user.user_id, notification_text, parse_mode="Markdown")
+                
+                # 2. Перерисовываем меню НИЖЕ уведомления
+                # (Эта функция удалит старое меню и пришлет новое)
+                restore_user_interface(user.user_id, session)
+                
+            except Exception as e:
+                print(f"Ошибка отправки уведомления юзеру: {e}")
         
         session.close()
         return
