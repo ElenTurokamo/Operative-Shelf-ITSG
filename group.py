@@ -119,7 +119,7 @@ def handle_admin_callback(bot, call):
         ADMIN_STATES[user_id]['data']['exist_id'] = item_id 
         
         bot.edit_message_text(
-            f"📦 Товар: {item.item_name}\n🔢 Введите количество для добавления (цифрой):", 
+            f"📦 Товар: {item.item_name}\n▸ Введите количество для добавления (цифрой):", 
             chat_id, 
             call.message.message_id
         )
