@@ -1,3 +1,4 @@
+# models.py
 import os
 from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
@@ -16,7 +17,11 @@ class User(Base):
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=True)
     
+    last_msg_id = Column(BigInteger, nullable=True) 
+    
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    requests = relationship("Request", back_populates="user")
 
     def __repr__(self):
         return f"<User {self.it_code}>"
@@ -29,6 +34,8 @@ class Storage(Base):
     category = Column(String(100), nullable=False)
     item_name = Column(String(255), nullable=False)
     quantity = Column(Integer, default=0, nullable=False)
+    
+    requests = relationship("Request", back_populates="item")
 
     def __repr__(self):
         return f"<Item {self.item_name} (Qty: {self.quantity})>"
@@ -46,11 +53,12 @@ class Request(Base):
     comment = Column(Text, nullable=True)
     
     is_approved = Column(Boolean, default=False)
+    status = Column(String(20), default='pending', nullable=False)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    user = relationship("User", backref="requests")
-    item = relationship("Storage", backref="requests")
+    user = relationship("User", back_populates="requests")
+    item = relationship("Storage", back_populates="requests")
 
     def __repr__(self):
         return f"<Request {self.id} by {self.user_pk}>"

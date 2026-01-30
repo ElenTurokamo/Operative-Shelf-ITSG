@@ -19,7 +19,6 @@ STATES = {
     'WAIT_COMMENT': 4
 }
 
-
 def get_db_session():
     return Session()
 
@@ -28,8 +27,67 @@ def get_user(session, user_id):
 
 def clear_state(chat_id):
     if chat_id in user_data:
-        del user_data[chat_id]
+        # Оставляем last_msg_id, чистим только данные текущего заказа
+        if 'state' in user_data[chat_id]:
+            del user_data[chat_id]['state']
+        if 'temp' in user_data[chat_id]:
+            del user_data[chat_id]['temp']
 
+# --- ХЕЛПЕР: Сохранение ID сообщения в БД ---
+def save_last_msg_id(chat_id, message_id):
+    session = get_db_session()
+    try:
+        user = session.query(User).filter_by(user_id=chat_id).first()
+        if user:
+            user.last_msg_id = message_id
+            session.commit()
+    except Exception as e:
+        print(f"Error saving msg_id: {e}")
+    finally:
+        session.close()
+
+# --- ХЕЛПЕР: Восстановление интерфейса ---
+def restore_user_interface(chat_id, session):
+    """
+    Восстанавливает меню или форму ввода для пользователя
+    после того, как админ ответил на предыдущую заявку.
+    """
+    user_state = user_data.get(chat_id, {}).get('state')
+    temp = user_data.get(chat_id, {}).get('temp', {})
+    
+    text_to_send = ""
+    markup_to_send = None
+
+    # Сценарий 1: Пользователь вводил количество
+    if user_state == STATES['WAIT_QTY']:
+        item = session.query(Storage).get(temp.get('item_id'))
+        if item:
+            text_to_send = f"\nВыбрано: {item.item_name}\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
+
+    # Сценарий 2: Пользователь писал комментарий
+    elif user_state == STATES['WAIT_COMMENT']:
+        item = session.query(Storage).get(temp.get('item_id'))
+        qty = temp.get('qty')
+        if item:
+            text_to_send = f"\nТовар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
+
+    # Сценарий 3: Пользователь просто в меню (или нет активного стейта)
+    else:
+        text_to_send = "Выберите категорию:"
+        markup_to_send = kb_categories(session)
+
+    # Отправляем восстанавливающее сообщение
+    try:
+        msg = bot.send_message(chat_id, text_to_send, reply_markup=markup_to_send)
+        # Запоминаем новый ID
+        user = session.query(User).filter_by(user_id=chat_id).first()
+        if user:
+            user.last_msg_id = msg.message_id
+            session.commit()
+    except Exception as e:
+        print(f"Error restoring UI: {e}")
+
+# --- Клавиатуры ---
 def kb_categories(session):
     markup = types.InlineKeyboardMarkup(row_width=2)
     categories = session.query(Storage.category).distinct().all()
@@ -41,9 +99,10 @@ def kb_items(session, category):
     markup = types.InlineKeyboardMarkup(row_width=1)
     items = session.query(Storage).filter_by(category=category).all()
     for item in items:
-        btn_text = f"{item.item_name} | Остаток: {item.quantity}"
+        name = item.item_name
+        if len(name) > 20: name = name[:20] + ".."
+        btn_text = f"{name} (📦 {item.quantity})"
         markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"prod_{item.id}"))
-    
     markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return markup
 
@@ -55,45 +114,54 @@ def kb_confirm():
     )
     return markup
 
-# --- Handlers: Start и Регистрация ---
+# --- Handlers ---
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     session = get_db_session()
     user = get_user(session, message.chat.id)
-    session.close()
-
+    
     if user:
-        bot.send_message(
+        msg = bot.send_message(
             message.chat.id, 
             f"Привет, {user.first_name}! Выбери категорию:", 
-            reply_markup=kb_categories(get_db_session())
+            reply_markup=kb_categories(session)
         )
+        user.last_msg_id = msg.message_id
+        session.commit()
     else:
         user_data[message.chat.id] = {'state': STATES['REG_IT'], 'temp': {}}
         bot.send_message(message.chat.id, "Вы не зарегистрированы.\nВведите ваш IT-код (например, IT293):")
+    
+    session.close()
 
+# Обработчик текста
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     chat_id = message.chat.id
+    
+    # Игнорируем сообщения в админ-группе
+    if str(chat_id) == str(GROUP_ID):
+        return
+
     if chat_id not in user_data:
         return
 
     state = user_data[chat_id].get('state')
     text = message.text.strip()
+    session = get_db_session()
 
     try:
         bot.delete_message(chat_id, message.message_id)
     except:
         pass
 
-    session = get_db_session()
-
+    # --- РЕГИСТРАЦИЯ ---
     if state == STATES['REG_IT']:
         user_data[chat_id]['temp']['it_code'] = text
         user_data[chat_id]['state'] = STATES['REG_NAME']
         msg = bot.send_message(chat_id, "Введите Имя и Фамилию:")
-        user_data[chat_id]['last_msg_id'] = msg.message_id 
+        # Для регистрации можно не использовать last_msg_id, так как там линейный процесс
 
     elif state == STATES['REG_NAME']:
         it_code = user_data[chat_id]['temp']['it_code']
@@ -101,29 +169,22 @@ def handle_text(message):
         first_name = parts[0]
         last_name = parts[1] if len(parts) > 1 else ""
 
-        new_user = User(
-            user_id=chat_id,
-            it_code=it_code,
-            first_name=first_name,
-            last_name=last_name
-        )
+        new_user = User(user_id=chat_id, it_code=it_code, first_name=first_name, last_name=last_name)
         session.add(new_user)
         try:
             session.commit()
-            bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=user_data[chat_id]['last_msg_id'],
-                text="✅ Регистрация успешна! Выберите категорию:",
-                reply_markup=kb_categories(session)
-            )
+            msg = bot.send_message(chat_id, "✅ Регистрация успешна!", reply_markup=kb_categories(session))
+            new_user.last_msg_id = msg.message_id
+            session.commit()
             user_data[chat_id] = {} 
         except Exception as e:
-            bot.send_message(chat_id, "Ошибка регистрации. Возможно, такой IT-код уже есть.")
+            bot.send_message(chat_id, "Ошибка регистрации (возможно, IT-код занят). /start")
             session.rollback()
-        
+
+    # --- ЗАКАЗ ТОВАРА ---
     elif state == STATES['WAIT_QTY']:
         if not text.isdigit():
-            bot.send_message(chat_id, "❌ Пожалуйста, введите число.")
+            bot.send_message(chat_id, "❌ Введите число!")
             return
 
         qty = int(text)
@@ -138,50 +199,119 @@ def handle_text(message):
         user_data[chat_id]['temp']['qty'] = qty
         user_data[chat_id]['state'] = STATES['WAIT_COMMENT']
         
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=user_data[chat_id]['msg_id'],
-            text=f"Товар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
-        )
+        # Обновляем старое сообщение
+        user = session.query(User).filter_by(user_id=chat_id).first()
+        last_id = user.last_msg_id if user else None
+
+        if last_id:
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=last_id,
+                    text=f"Товар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
+                )
+            except:
+                msg = bot.send_message(chat_id, f"Товар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий:")
+                save_last_msg_id(chat_id, msg.message_id)
 
     elif state == STATES['WAIT_COMMENT']:
         user_data[chat_id]['temp']['comment'] = text
         temp = user_data[chat_id]['temp']
         item = session.query(Storage).get(temp['item_id'])
         
-        summary_text = (
-            f"📋 **Проверка данных**:\n"
-            f"Товар: {item.item_name}\n"
-            f"Кол-во: {temp['qty']}\n"
-            f"Коммент: {temp['comment']}"
-        )
+        summary = f"📋 **Проверка**:\nТовар: {item.item_name}\nКол-во: {temp['qty']}\nКоммент: {temp['comment']}"
         
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=user_data[chat_id]['msg_id'],
-            text=summary_text,
-            parse_mode="Markdown",
-            reply_markup=kb_confirm()
-        )
+        user = session.query(User).filter_by(user_id=chat_id).first()
+        last_id = user.last_msg_id
+
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=last_id,
+                text=summary,
+                parse_mode="Markdown",
+                reply_markup=kb_confirm()
+            )
+        except:
+            msg = bot.send_message(chat_id, summary, parse_mode="Markdown", reply_markup=kb_confirm())
+            save_last_msg_id(chat_id, msg.message_id)
+
         user_data[chat_id]['state'] = None 
 
     session.close()
 
-# --- Handlers: Callbacks (Кнопки) ---
-
+# --- Callback Handler ---
 @bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
+def handle_all_callbacks(call):
     chat_id = call.message.chat.id
     data = call.data
     session = get_db_session()
 
+    # === АДМИНСКАЯ ЛОГИКА ===
+    if data.startswith("req_"):
+        action, req_id = data.split(":")
+        req_id = int(req_id)
+        
+        req = session.query(Request).get(req_id)
+        if not req or req.status != 'pending':
+            bot.answer_callback_query(call.id, "Заявка не актуальна")
+            session.close()
+            return
+
+        user = req.user
+        item = req.item
+        
+        # Удаляем старое сообщение у юзера, чтобы не мешало
+        if user.last_msg_id:
+            try:
+                bot.delete_message(user.user_id, user.last_msg_id)
+            except:
+                pass
+
+        if action == "req_appr":
+            if item.quantity >= req.req_count:
+                item.quantity -= req.req_count
+                req.is_approved = True
+                req.status = 'approved'
+                
+                bot.send_message(user.user_id, f"✅ Ваша заявка #{req.id} на **{item.item_name}** одобрена! Можете забирать.", parse_mode="Markdown")
+                
+                new_text = call.message.text + f"\n\n✅ ОДОБРЕНО администратором."
+                bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
+            else:
+                bot.answer_callback_query(call.id, "Мало товара!")
+                session.close()
+                return
+
+        elif action == "req_rej":
+            req.is_approved = False
+            req.status = 'rejected'
+            
+            bot.send_message(user.user_id, f"⛔ Ваша заявка #{req.id} на **{item.item_name}** отклонена.", parse_mode="Markdown")
+            
+            new_text = call.message.text + f"\n\n⛔ ОТКЛОНЕНО администратором."
+            bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
+
+        session.commit()
+        
+        # ВОССТАНАВЛИВАЕМ ИНТЕРФЕЙС ЮЗЕРА
+        restore_user_interface(user.user_id, session)
+        
+        session.close()
+        return
+
+    # === ЛОГИКА ПОЛЬЗОВАТЕЛЯ ===
+    
+    # Обновляем last_msg_id на текущее сообщение
+    save_last_msg_id(chat_id, call.message.message_id)
+
     if data.startswith("cat_"):
-        category = data.split("cat_")[1]
+        cat = data.split("cat_")[1]
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=call.message.message_id,
-            text=f"📂 Категория: {category}",
-            reply_markup=kb_items(session, category)
+            text=f"📂 Категория: {cat}",
+            reply_markup=kb_items(session, cat)
         )
 
     elif data == "back_main":
@@ -198,7 +328,6 @@ def handle_callback(call):
         
         user_data[chat_id] = {
             'state': STATES['WAIT_QTY'],
-            'msg_id': call.message.message_id, 
             'temp': {'item_id': item_id}
         }
         
@@ -210,7 +339,7 @@ def handle_callback(call):
 
     elif data == "confirm_order":
         if chat_id not in user_data or 'temp' not in user_data[chat_id]:
-            bot.answer_callback_query(call.id, "Сессия истекла. Начните заново /start")
+            bot.answer_callback_query(call.id, "Сессия истекла")
             return
 
         temp = user_data[chat_id]['temp']
@@ -218,61 +347,60 @@ def handle_callback(call):
         qty = temp['qty']
         comment = temp['comment']
         
-        try:
-            item = session.query(Storage).with_for_update().get(item_id) 
-            user = session.query(User).filter_by(user_id=chat_id).first()
+        item = session.query(Storage).get(item_id)
+        user = session.query(User).filter_by(user_id=chat_id).first()
 
-            if item.quantity >= qty:
-                item.quantity -= qty
-                
-                new_req = Request(
-                    user_pk=user.id,
-                    item_id=item_id,
-                    req_count=qty,
-                    comment=comment,
-                    is_approved=True 
-                )
-                session.add(new_req)
-                session.commit()
+        new_req = Request(
+            user_pk=user.id,
+            item_id=item_id,
+            req_count=qty,
+            comment=comment,
+            status='pending'
+        )
+        session.add(new_req)
+        session.commit()
 
-                bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=call.message.message_id,
-                    text="✅ Заявка успешно оформлена! Товар списан."
-                )
-
-                report = (
-                    f"📦 **Новая выдача**\n"
-                    f"👤 Сотрудник: {user.it_code} ({user.first_name} {user.last_name})\n"
-                    f"🛠 Товар: {item.item_name}\n"
-                    f"🔢 Кол-во: {qty}\n"
-                    f"💬 Комментарий: {comment}"
-                )
-                bot.send_message(GROUP_ID, report, parse_mode="Markdown")
-            else:
-                bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=call.message.message_id,
-                    text="❌ Ошибка! Пока вы заполняли, товар закончился."
-                )
-        except Exception as e:
-            session.rollback()
-            bot.send_message(chat_id, f"Произошла ошибка базы данных: {e}")
-        finally:
-            clear_state(chat_id)
+        # Показываем Успех + Меню категорий
+        success_text = f"✅ **Заявка #{new_req.id} отправлена!**\n\nНужно заказать что-то ещё? Выберите категорию:"
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text=success_text,
+            parse_mode="Markdown",
+            reply_markup=kb_categories(session)
+        )
+        
+        markup_admin = types.InlineKeyboardMarkup()
+        markup_admin.add(
+            types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"req_appr:{new_req.id}"),
+            types.InlineKeyboardButton("⛔ Отказать", callback_data=f"req_rej:{new_req.id}")
+        )
+        
+        # --- ВАШ ФОРМАТ ЗАЯВКИ ---
+        report = (
+            f"📦 **НОВАЯ ЗАЯВКА** #{new_req.id}\n"
+            f"▸ Сотрудник: {user.it_code} ({user.first_name} {user.last_name})\n"
+            f"▸ Товар: {item.item_name}\n"
+            f"▸ Запрос: {qty} шт.\n"
+            f"▸ На складе: {item.quantity} шт.\n\n"
+            f"💬 Цель: {comment}"
+        )
+        # -------------------------
+        
+        bot.send_message(GROUP_ID, report, parse_mode="Markdown", reply_markup=markup_admin)
+        clear_state(chat_id)
 
     elif data == "cancel_order":
         clear_state(chat_id)
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=call.message.message_id,
-            text="❌ Заявка отменена. Вернуться в начало: /start"
+            text="❌ Отменено.\nВыберите категорию:",
+            reply_markup=kb_categories(session)
         )
 
     session.close()
 
 if __name__ == "__main__":
-    print("---")
-    print("Бот Оперативный ITSG запущен и готов к работе...")
-    print("---")
+    print("Бот запущен...")
     bot.infinity_polling()
