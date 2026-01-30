@@ -1,0 +1,4 @@
+pyTelegramBotAPI
+SQLAlchemy
+python-dotenv
+mysql-connector-python
