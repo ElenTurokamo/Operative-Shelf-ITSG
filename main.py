@@ -4,6 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from config import BOT_TOKEN, GROUP_ID, DB_URL
 from models import Base, User, Storage, Request
+from group import start_add_process, handle_admin_callback, handle_admin_text
+
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -139,6 +141,8 @@ def cmd_start(message):
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     chat_id = message.chat.id
+    if handle_admin_text(bot, message):
+        return
     
     # Игнорируем сообщения в админ-группе
     if str(chat_id) == str(GROUP_ID):
@@ -240,9 +244,16 @@ def handle_text(message):
 
     session.close()
 
+@bot.message_handler(commands=['add_item'])
+def cmd_add_item(message):
+    # Тут можно добавить проверку ID админа, если нужно
+    start_add_process(bot, message)
+
 # --- Callback Handler ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
+    handle_admin_callback(bot, call)
+    
     chat_id = call.message.chat.id
     data = call.data
     session = get_db_session()
