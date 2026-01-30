@@ -4,7 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from config import BOT_TOKEN, GROUP_ID, DB_URL
 from models import Base, User, Storage, Request
-from group import start_add_process, handle_admin_callback, handle_admin_text
+# Убираем импорт handle_admin_callback, чтобы не путаться
+from group import start_add_process, handle_admin_text 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -46,24 +47,22 @@ def save_last_msg_id(chat_id, message_id):
     finally:
         session.close()
 
-# --- ХЕЛПЕР: Восстановление интерфейса (С УДАЛЕНИЕМ) ---
+# --- ХЕЛПЕР: Восстановление интерфейса ---
 def restore_user_interface(chat_id, session):
     """
-    1. Удаляет старое сообщение (если есть).
-    2. Отправляет новое актуальное состояние вниз.
+    1. Удаляет старое сообщение (меню/ввод).
+    2. Отправляет новое актуальное состояние вниз чата.
     """
     user_state = user_data.get(chat_id, {}).get('state')
     temp = user_data.get(chat_id, {}).get('temp', {})
     
-    # --- 1. ЛОГИКА УДАЛЕНИЯ СТАРОГО СООБЩЕНИЯ ---
+    # 1. Удаляем старое сообщение, чтобы не засорять чат
     user = session.query(User).filter_by(user_id=chat_id).first()
     if user and user.last_msg_id:
         try:
             bot.delete_message(chat_id, user.last_msg_id)
         except Exception:
-            # Сообщение могло быть уже удалено или слишком старым
-            pass
-    # ---------------------------------------------
+            pass # Сообщение уже удалено или слишком старое
 
     text_to_send = ""
     markup_to_send = None
@@ -72,7 +71,7 @@ def restore_user_interface(chat_id, session):
     if user_state == STATES['WAIT_QTY']:
         item = session.query(Storage).get(temp.get('item_id'))
         if item:
-            text_to_send = f"🔽 Продолжаем оформление:\n\nВыбрано: **{item.item_name}**\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
+            text_to_send = f"🔽 Создание заказа:\n\nВыбрано: **{item.item_name}**\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
         else:
             # Если товар удален, сбрасываем в меню
             text_to_send = "Товар больше недоступен. Выберите категорию:"
@@ -84,18 +83,18 @@ def restore_user_interface(chat_id, session):
         item = session.query(Storage).get(temp.get('item_id'))
         qty = temp.get('qty')
         if item:
-            text_to_send = f"🔽 Продолжаем оформление:\n\nТовар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
+            text_to_send = f"🔽 Создание заказа:\n\nТовар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
 
     # Сценарий 3: Пользователь просто в меню (или заказ завершен)
     else:
         text_to_send = "Что-нибудь ещё? Выберите категорию:"
         markup_to_send = kb_categories(session)
 
-    # --- 2. ОТПРАВКА НОВОГО СООБЩЕНИЯ ---
+    # 2. Отправляем новое сообщение ВНИЗ
     try:
         msg = bot.send_message(chat_id, text_to_send, reply_markup=markup_to_send, parse_mode="Markdown")
         
-        # Обновляем ID последнего сообщения в базе
+        # Запоминаем ID этого нового сообщения
         if user:
             user.last_msg_id = msg.message_id
             session.commit()
@@ -137,10 +136,9 @@ def cmd_start(message):
     user = get_user(session, message.chat.id)
     
     if user:
-        # Если есть старое сообщение, удаляем его перед отправкой нового
+        # Чистим старое, если есть
         if user.last_msg_id:
-            try:
-                bot.delete_message(message.chat.id, user.last_msg_id)
+            try: bot.delete_message(message.chat.id, user.last_msg_id)
             except: pass
 
         msg = bot.send_message(
@@ -179,7 +177,6 @@ def handle_text(message):
     text = message.text.strip()
     session = get_db_session()
 
-    # Удаляем сообщение пользователя, чтобы не засорять чат (опционально)
     try:
         bot.delete_message(chat_id, message.message_id)
     except:
@@ -212,7 +209,6 @@ def handle_text(message):
     # --- ЗАКАЗ ТОВАРА ---
     elif state == STATES['WAIT_QTY']:
         if not text.isdigit():
-            # Тут можно отправить временное сообщение и удалить его
             return
 
         qty = int(text)
@@ -227,7 +223,6 @@ def handle_text(message):
         user_data[chat_id]['temp']['qty'] = qty
         user_data[chat_id]['state'] = STATES['WAIT_COMMENT']
         
-        # Обновляем старое сообщение (меню) на просьбу коммента
         user = session.query(User).filter_by(user_id=chat_id).first()
         last_id = user.last_msg_id if user else None
 
@@ -240,7 +235,6 @@ def handle_text(message):
                     parse_mode="Markdown"
                 )
             except:
-                # Если редактировать не вышло (например, старое удалено), шлем новое
                 msg = bot.send_message(chat_id, f"Товар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий:")
                 save_last_msg_id(chat_id, msg.message_id)
 
@@ -273,27 +267,28 @@ def handle_text(message):
 # --- Callback Handler ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
-    handle_admin_callback(bot, call)
-
     chat_id = call.message.chat.id
     data = call.data
     session = get_db_session()
 
-    # === АДМИНСКАЯ ЛОГИКА ===
+    # === 1. АДМИНСКАЯ ЛОГИКА (ВНУТРИ MAIN.PY) ===
+    # ВАЖНО: Мы убрали вызов handle_admin_callback(bot, call) отсюда,
+    # чтобы логика не дублировалась и restore_user_interface срабатывал.
+    
     if data.startswith("req_"):
         action, req_id = data.split(":")
         req_id = int(req_id)
         
         req = session.query(Request).get(req_id)
         if not req or req.status != 'pending':
-            bot.answer_callback_query(call.id, "Заявка не актуальна")
+            bot.answer_callback_query(call.id, "Заявка уже обработана")
             session.close()
             return
 
         user = req.user
         item = req.item
         
-        # Переменная для текста уведомления юзеру
+        # Переменная для уведомления юзеру
         notification_text = ""
 
         if action == "req_appr":
@@ -305,8 +300,7 @@ def handle_all_callbacks(call):
                 notification_text = f"✅ Ваша заявка #{req.id} на **{item.item_name}** одобрена! Можете забирать."
                 
                 new_text = call.message.text + f"\n\n✅ ОДОБРЕНО администратором."
-                try:
-                    bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
+                try: bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
                 except: pass
             else:
                 bot.answer_callback_query(call.id, "Мало товара!")
@@ -320,18 +314,17 @@ def handle_all_callbacks(call):
             notification_text = f"⛔ Ваша заявка #{req.id} на **{item.item_name}** отклонена."
             
             new_text = call.message.text + f"\n\n⛔ ОТКЛОНЕНО администратором."
-            try:
-                bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
+            try: bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=None)
             except: pass
 
         session.commit()
         
-        # --- UX МАГИЯ ---
+        # --- UX МАГИЯ: Уведомляем и восстанавливаем меню ---
         if notification_text:
             try:
-                # 1. Отправляем уведомление (оно падает в историю)
+                # 1. Шлем уведомление юзеру
                 bot.send_message(user.user_id, notification_text, parse_mode="Markdown")
-                # 2. Восстанавливаем интерфейс (удаляем старое меню, рисуем новое внизу)
+                # 2. Удаляем старое меню и шлем новое вниз
                 restore_user_interface(user.user_id, session)
             except Exception as e:
                 print(f"Ошибка UX обновления: {e}")
@@ -339,9 +332,9 @@ def handle_all_callbacks(call):
         session.close()
         return
 
-    # === ЛОГИКА ПОЛЬЗОВАТЕЛЯ ===
+    # === 2. ЛОГИКА ПОЛЬЗОВАТЕЛЯ ===
     
-    # Сохраняем ID текущего сообщения как "последнее", т.к. пользователь нажал на него
+    # Сохраняем это сообщение как последнее активное
     save_last_msg_id(chat_id, call.message.message_id)
 
     if data.startswith("cat_"):
@@ -399,7 +392,7 @@ def handle_all_callbacks(call):
         session.add(new_req)
         session.commit()
 
-        # Показываем Успех + Меню категорий (редактируя текущее сообщение)
+        # Показываем Успех + Меню категорий
         success_text = f"✅ **Заявка #{new_req.id} отправлена!**\n\nНужно заказать что-то ещё? Выберите категорию:"
         bot.edit_message_text(
             chat_id=chat_id,
