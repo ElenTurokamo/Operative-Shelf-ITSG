@@ -4,8 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from config import BOT_TOKEN, GROUP_ID, DB_URL
 from models import Base, User, Storage, Request
-# Убираем импорт handle_admin_callback, чтобы не путаться
-from group import start_add_process, handle_admin_text 
+# Импортируем handle_admin_callback, он нужен для кнопок добавления товара (adm_)
+from group import start_add_process, handle_admin_text, handle_admin_callback
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -56,36 +56,35 @@ def restore_user_interface(chat_id, session):
     user_state = user_data.get(chat_id, {}).get('state')
     temp = user_data.get(chat_id, {}).get('temp', {})
     
-    # 1. Удаляем старое сообщение, чтобы не засорять чат
+    # 1. Удаляем старое сообщение
     user = session.query(User).filter_by(user_id=chat_id).first()
     if user and user.last_msg_id:
         try:
             bot.delete_message(chat_id, user.last_msg_id)
         except Exception:
-            pass # Сообщение уже удалено или слишком старое
+            pass 
 
     text_to_send = ""
     markup_to_send = None
 
-    # Сценарий 1: Пользователь вводил количество (восстанавливаем ввод)
+    # Сценарий 1: Пользователь вводил количество
     if user_state == STATES['WAIT_QTY']:
         item = session.query(Storage).get(temp.get('item_id'))
         if item:
             text_to_send = f"🔽 Создание заказа:\n\nВыбрано: **{item.item_name}**\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
         else:
-            # Если товар удален, сбрасываем в меню
             text_to_send = "Товар больше недоступен. Выберите категорию:"
             markup_to_send = kb_categories(session)
             user_data[chat_id] = {}
 
-    # Сценарий 2: Пользователь писал комментарий (восстанавливаем ввод)
+    # Сценарий 2: Пользователь писал комментарий
     elif user_state == STATES['WAIT_COMMENT']:
         item = session.query(Storage).get(temp.get('item_id'))
         qty = temp.get('qty')
         if item:
             text_to_send = f"🔽 Создание заказа:\n\nТовар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
 
-    # Сценарий 3: Пользователь просто в меню (или заказ завершен)
+    # Сценарий 3: Пользователь просто в меню
     else:
         text_to_send = "Что-нибудь ещё? Выберите категорию:"
         markup_to_send = kb_categories(session)
@@ -93,8 +92,6 @@ def restore_user_interface(chat_id, session):
     # 2. Отправляем новое сообщение ВНИЗ
     try:
         msg = bot.send_message(chat_id, text_to_send, reply_markup=markup_to_send, parse_mode="Markdown")
-        
-        # Запоминаем ID этого нового сообщения
         if user:
             user.last_msg_id = msg.message_id
             session.commit()
@@ -136,7 +133,6 @@ def cmd_start(message):
     user = get_user(session, message.chat.id)
     
     if user:
-        # Чистим старое, если есть
         if user.last_msg_id:
             try: bot.delete_message(message.chat.id, user.last_msg_id)
             except: pass
@@ -271,9 +267,15 @@ def handle_all_callbacks(call):
     data = call.data
     session = get_db_session()
 
-    # === 1. АДМИНСКАЯ ЛОГИКА (ВНУТРИ MAIN.PY) ===
-    # ВАЖНО: Мы убрали вызов handle_admin_callback(bot, call) отсюда,
-    # чтобы логика не дублировалась и restore_user_interface срабатывал.
+    # === ИСПРАВЛЕНИЕ ЗДЕСЬ ===
+    # Если это кнопки настройки (adm_...) -> отдаем в group.py
+    if data.startswith("adm_"):
+        handle_admin_callback(bot, call)
+        session.close()
+        return
+
+    # Если это кнопки заявки (req_...) -> обрабатываем ЗДЕСЬ, в main.py
+    # (Не вызываем handle_admin_callback для них, иначе будет дубль)
     
     if data.startswith("req_"):
         action, req_id = data.split(":")
@@ -288,7 +290,6 @@ def handle_all_callbacks(call):
         user = req.user
         item = req.item
         
-        # Переменная для уведомления юзеру
         notification_text = ""
 
         if action == "req_appr":
@@ -319,12 +320,10 @@ def handle_all_callbacks(call):
 
         session.commit()
         
-        # --- UX МАГИЯ: Уведомляем и восстанавливаем меню ---
         if notification_text:
             try:
-                # 1. Шлем уведомление юзеру
                 bot.send_message(user.user_id, notification_text, parse_mode="Markdown")
-                # 2. Удаляем старое меню и шлем новое вниз
+                # ВОССТАНАВЛИВАЕМ ИНТЕРФЕЙС
                 restore_user_interface(user.user_id, session)
             except Exception as e:
                 print(f"Ошибка UX обновления: {e}")
@@ -332,9 +331,8 @@ def handle_all_callbacks(call):
         session.close()
         return
 
-    # === 2. ЛОГИКА ПОЛЬЗОВАТЕЛЯ ===
+    # === ЛОГИКА ПОЛЬЗОВАТЕЛЯ ===
     
-    # Сохраняем это сообщение как последнее активное
     save_last_msg_id(chat_id, call.message.message_id)
 
     if data.startswith("cat_"):
@@ -392,7 +390,6 @@ def handle_all_callbacks(call):
         session.add(new_req)
         session.commit()
 
-        # Показываем Успех + Меню категорий
         success_text = f"✅ **Заявка #{new_req.id} отправлена!**\n\nНужно заказать что-то ещё? Выберите категорию:"
         bot.edit_message_text(
             chat_id=chat_id,
