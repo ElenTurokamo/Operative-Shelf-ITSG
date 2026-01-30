@@ -137,6 +137,15 @@ def cmd_start(message):
     
     session.close()
 
+@bot.message_handler(commands=['add', 'add_item'])
+def cmd_add_item(message):
+    # Разрешаем только в админ-группе
+    if str(message.chat.id) != str(GROUP_ID):
+        bot.reply_to(message, "Команда доступна только в админ-группе.")
+        return
+
+    start_add_process(bot, message)
+    
 # Обработчик текста
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
@@ -253,7 +262,7 @@ def cmd_add_item(message):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
     handle_admin_callback(bot, call)
-    
+
     chat_id = call.message.chat.id
     data = call.data
     session = get_db_session()
