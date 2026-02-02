@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, text
 from models import Base
 
 # --- НАСТРОЙКИ ПО УМОЛЧАНИЮ ---
-DEFAULT_DB_HOST = "db"
+DEFAULT_DB_HOST = "localhost"
 DEFAULT_DB_NAME = "telegram_bot_db"
 DEFAULT_NEW_USER = "bot_admin"
 

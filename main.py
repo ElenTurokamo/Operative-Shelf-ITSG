@@ -4,8 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from config import BOT_TOKEN, GROUP_ID, DB_URL
 from models import Base, User, Storage, Request
-# Импортируем handle_admin_callback, он нужен для кнопок добавления товара (adm_)
-from group import start_add_process, handle_admin_text, handle_admin_callback
+# Импортируем функции админки
+from group import start_add_process, start_edit_process, handle_admin_text, handle_admin_callback
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -47,6 +47,12 @@ def save_last_msg_id(chat_id, message_id):
     finally:
         session.close()
 
+# --- ХЕЛПЕР: Кнопка отмены (для этапов ввода) ---
+def kb_cancel_only():
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Отмена", callback_data="cancel_order"))
+    return markup
+
 # --- ХЕЛПЕР: Восстановление интерфейса ---
 def restore_user_interface(chat_id, session):
     """
@@ -71,7 +77,14 @@ def restore_user_interface(chat_id, session):
     if user_state == STATES['WAIT_QTY']:
         item = session.query(Storage).get(temp.get('item_id'))
         if item:
-            text_to_send = f"🔽 Создание заказа:\n\nВыбрано: **{item.item_name}**\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
+            text_to_send = (
+                f"🔽 Создание заказа:\n\n"
+                f"Выбрано: **{item.item_name}**\n"
+                f"Доступно: {item.quantity}\n"
+                f"Себестоимость: {item.cost_price}₸\n\n"
+                f"🔢 Введите количество в чат:"
+            )
+            markup_to_send = kb_cancel_only()
         else:
             text_to_send = "Товар больше недоступен. Выберите категорию:"
             markup_to_send = kb_categories(session)
@@ -83,6 +96,7 @@ def restore_user_interface(chat_id, session):
         qty = temp.get('qty')
         if item:
             text_to_send = f"🔽 Создание заказа:\n\nТовар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
+            markup_to_send = kb_cancel_only()
 
     # Сценарий 3: Пользователь просто в меню
     else:
@@ -102,7 +116,8 @@ def restore_user_interface(chat_id, session):
 def kb_categories(session):
     markup = types.InlineKeyboardMarkup(row_width=2)
     categories = session.query(Storage.category).distinct().all()
-    buttons = [types.InlineKeyboardButton(cat[0], callback_data=f"cat_{cat[0]}") for cat in categories]
+    # Фильтруем пустые категории, если есть
+    buttons = [types.InlineKeyboardButton(cat[0], callback_data=f"cat_{cat[0]}") for cat in categories if cat[0]]
     markup.add(*buttons)
     return markup
 
@@ -121,7 +136,7 @@ def kb_confirm():
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_order"),
-        types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_order")
+        types.InlineKeyboardButton("Отмена", callback_data="cancel_order")
     )
     return markup
 
@@ -129,6 +144,10 @@ def kb_confirm():
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
+    # Если пишут в админскую группу, игнорируем
+    if str(message.chat.id) == str(GROUP_ID):
+        return
+
     session = get_db_session()
     user = get_user(session, message.chat.id)
     
@@ -152,20 +171,34 @@ def cmd_start(message):
 
 @bot.message_handler(commands=['add', 'add_item'])
 def cmd_add_item(message):
+    # Разрешаем только в админ-группе (или ЛС админа, если нужно)
     if str(message.chat.id) != str(GROUP_ID):
-        bot.reply_to(message, "Команда доступна только в админ-группе.")
+        # bot.reply_to(message, "Команда доступна только администраторам.")
         return
+        
     start_add_process(bot, message)
+    
+@bot.message_handler(commands=['edit', 'change'])
+def cmd_edit_item(message):
+    # Разрешаем только в админ-группе
+    if str(message.chat.id) != str(GROUP_ID):
+        return
+        
+    start_edit_process(bot, message)
     
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     chat_id = message.chat.id
+    
+    # 1. Сначала проверяем админские состояния (ввод цены, названия и т.д.)
     if handle_admin_text(bot, message):
         return
     
+    # 2. Если сообщение в админ-группе и не обработано админкой -> игнор
     if str(chat_id) == str(GROUP_ID):
         return
 
+    # 3. Обработка пользовательских состояний
     if chat_id not in user_data:
         return
 
@@ -222,16 +255,19 @@ def handle_text(message):
         user = session.query(User).filter_by(user_id=chat_id).first()
         last_id = user.last_msg_id if user else None
 
+        msg_text = f"Товар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):"
+
         if last_id:
             try:
                 bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=last_id,
-                    text=f"Товар: **{item.item_name}**\nКоличество: {qty}\n\n📝 Напишите комментарий (цель использования):",
-                    parse_mode="Markdown"
+                    text=msg_text,
+                    parse_mode="Markdown",
+                    reply_markup=kb_cancel_only()
                 )
             except:
-                msg = bot.send_message(chat_id, f"Товар: {item.item_name}\nКоличество: {qty}\n\n📝 Напишите комментарий:")
+                msg = bot.send_message(chat_id, msg_text, parse_mode="Markdown", reply_markup=kb_cancel_only())
                 save_last_msg_id(chat_id, msg.message_id)
 
     elif state == STATES['WAIT_COMMENT']:
@@ -267,16 +303,13 @@ def handle_all_callbacks(call):
     data = call.data
     session = get_db_session()
 
-    # === ИСПРАВЛЕНИЕ ЗДЕСЬ ===
-    # Если это кнопки настройки (adm_...) -> отдаем в group.py
-    if data.startswith("adm_"):
+    # Админские кнопки: adm_ (навигация), edt_ (редактирование), conf_ (удаление)
+    if data.startswith("adm_") or data.startswith("edt_") or data.startswith("conf_"):
         handle_admin_callback(bot, call)
         session.close()
         return
 
-    # Если это кнопки заявки (req_...) -> обрабатываем ЗДЕСЬ, в main.py
-    # (Не вызываем handle_admin_callback для них, иначе будет дубль)
-    
+    # Админские кнопки заявок (req_) обрабатываем здесь
     if data.startswith("req_"):
         action, req_id = data.split(":")
         req_id = int(req_id)
@@ -323,7 +356,7 @@ def handle_all_callbacks(call):
         if notification_text:
             try:
                 bot.send_message(user.user_id, notification_text, parse_mode="Markdown")
-                # ВОССТАНАВЛИВАЕМ ИНТЕРФЕЙС
+                # ВОССТАНАВЛИВАЕМ ИНТЕРФЕЙС ПОЛЬЗОВАТЕЛЯ
                 restore_user_interface(user.user_id, session)
             except Exception as e:
                 print(f"Ошибка UX обновления: {e}")
@@ -361,10 +394,20 @@ def handle_all_callbacks(call):
             'temp': {'item_id': item_id}
         }
         
+        text_msg = (
+            f"🔽 Создание заказа:\n\n"
+            f"Выбрано: **{item.item_name}**\n"
+            f"Доступно: {item.quantity}\n"
+            f"Себестоимость: {item.cost_price}₸\n\n"
+            f"🔢 Введите количество в чат:"
+        )
+
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=call.message.message_id,
-            text=f"Выбрано: {item.item_name}\nДоступно: {item.quantity}\n\n🔢 Введите количество в чат:"
+            text=text_msg,
+            parse_mode="Markdown",
+            reply_markup=kb_cancel_only() # Кнопка отмены
         )
 
     elif data == "confirm_order":
@@ -422,7 +465,7 @@ def handle_all_callbacks(call):
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=call.message.message_id,
-            text="❌ Отменено.\nВыберите категорию:",
+            text="Отменено.\nВыберите категорию:",
             reply_markup=kb_categories(session)
         )
 

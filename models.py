@@ -1,6 +1,6 @@
 # models.py
 import os
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, ForeignKey, Numeric
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
 from dotenv import load_dotenv
@@ -21,7 +21,9 @@ class User(Base):
     
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    requests = relationship("Request", back_populates="user")
+    # === ИЗМЕНЕНИЕ ЗДЕСЬ ===
+    # Добавлено cascade="all, delete-orphan"
+    requests = relationship("Request", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User {self.it_code}>"
@@ -34,8 +36,12 @@ class Storage(Base):
     category = Column(String(100), nullable=False)
     item_name = Column(String(255), nullable=False)
     quantity = Column(Integer, default=0, nullable=False)
+    cost_price = Column(Numeric(12, 2), nullable=False, server_default="0")
     
-    requests = relationship("Request", back_populates="item")
+    # === ИЗМЕНЕНИЕ ЗДЕСЬ ===
+    # Добавлено cascade="all, delete-orphan"
+    requests = relationship("Request", back_populates="item", cascade="all, delete-orphan")
+
 
     def __repr__(self):
         return f"<Item {self.item_name} (Qty: {self.quantity})>"
@@ -46,8 +52,9 @@ class Request(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     
-    user_pk = Column(Integer, ForeignKey('users.id'), nullable=False)
-    item_id = Column(Integer, ForeignKey('storage.id'), nullable=False)
+    # ondelete='CASCADE' на уровне БД помогает, если вы пересоздадите таблицы
+    user_pk = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    item_id = Column(Integer, ForeignKey('storage.id', ondelete='CASCADE'), nullable=False)
     
     req_count = Column(Integer, nullable=False)
     comment = Column(Text, nullable=True)
