@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from config import DB_URL, GROUP_ID
 from models import Storage, Request, User
 from decimal import Decimal, InvalidOperation
+from excel_logger import log_admin_action
 
 # Создаем подключение
 engine = create_engine(DB_URL, pool_recycle=3600)
@@ -57,24 +58,30 @@ def reopen_admin_menu(bot, user_id, chat_id, text_prefix=""):
     """
     session = get_db_session()
     
+    # Восстанавливаем режим или ставим дефолтный 'add'
     current_data = ADMIN_STATES.get(user_id, {})
     mode = current_data.get('mode', 'add')
     
+    # Полная перезапись состояния
     ADMIN_STATES[user_id] = {
         'state': ADM_WAIT_CAT,
         'mode': mode,
         'data': {} 
     }
+    
+    # Убрали Markdown форматирование для надежности
     header = "📦 Пополнение склада (/add)" if mode == 'add' else "🛠 Редактор товаров (/edit)"
     
     cleanup_last_msg(bot, user_id, chat_id)
     
+    # 1. Если есть уведомление, отправляем его отдельно
     if text_prefix:
         try:
             bot.send_message(chat_id, text_prefix)
         except: 
             pass
 
+    # 2. Отправляем само меню
     try:
         msg = bot.send_message(
             chat_id, 
@@ -180,11 +187,11 @@ def handle_admin_callback(bot, call):
             mode = ADMIN_STATES[user_id].get('mode', 'add')
             header = "📦 Пополнение склада:" if mode == 'add' else "🛠 Редактор товаров:"
             
+            # Убрали Markdown
             bot.edit_message_text(
                 f"{header}\nВыберите категорию:", 
                 chat_id, call.message.message_id, 
-                reply_markup=kb_admin_categories(session),
-                parse_mode="Markdown"
+                reply_markup=kb_admin_categories(session)
             )
             return
 
@@ -279,8 +286,7 @@ def handle_admin_callback(bot, call):
             item_id = int(data.split(":")[1])
             item = session.query(Storage).get(item_id)
             ADMIN_STATES[user_id]['state'] = ADM_CONFIRM_DEL
-            
-            # УБРАЛИ parse_mode="Markdown" и звездочки
+            # Убрали Markdown
             bot.edit_message_text(
                 f"⚠️ Удалить товар '{item.item_name}'?", 
                 chat_id, call.message.message_id, 
@@ -292,8 +298,7 @@ def handle_admin_callback(bot, call):
             cat_name = data.split(":", 1)[1]
             ADMIN_STATES[user_id]['state'] = ADM_CONFIRM_DEL
             count = session.query(Storage).filter_by(category=cat_name).count()
-            
-            # УБРАЛИ parse_mode="Markdown" и звездочки
+            # Убрали Markdown
             bot.edit_message_text(
                 f"⛔️ Удалить категорию '{cat_name}' и ВСЕ её товары ({count} шт)?", 
                 chat_id, call.message.message_id, 
@@ -301,7 +306,7 @@ def handle_admin_callback(bot, call):
             )
             return
 
-        # 6. УДАЛЕНИЕ (Логика с ручной очисткой связей)
+        # 6. УДАЛЕНИЕ (Логика с ручной очисткой связей) + ЛОГИРОВАНИЕ
         if data.startswith("conf_del:"):
             _, target_type, target_id = data.split(":", 2)
             msg_result = ""
@@ -312,6 +317,10 @@ def handle_admin_callback(bot, call):
                     item = session.query(Storage).get(int(target_id))
                     if item:
                         name = item.item_name
+                        
+                        # LOG
+                        log_admin_action(user_id, "Удаление товара", f"Удален товар: {name}")
+
                         # Удаляем заявки
                         session.query(Request).filter(Request.item_id == item.id).delete(synchronize_session=False)
                         # Удаляем товар
@@ -326,6 +335,9 @@ def handle_admin_callback(bot, call):
                     items = session.query(Storage).filter_by(category=target_id).all()
                     deleted_count = 0
                     
+                    # LOG
+                    log_admin_action(user_id, "Удаление категории", f"Удалена категория: {target_id}")
+
                     for itm in items:
                         # Удаляем заявки для текущего товара
                         session.query(Request).filter(Request.item_id == itm.id).delete(synchronize_session=False)
@@ -410,6 +422,8 @@ def handle_admin_text(bot, message):
                 if item:
                     item.quantity += qty
                     msg = f"✅ Товар обновлен! Остаток: {item.quantity}"
+                    # LOG
+                    log_admin_action(user_id, "Пополнение", f"{item.item_name}: +{qty} шт.")
             else:
                 name = data.get('item_name')
                 cost = data.get('cost_price')
@@ -417,10 +431,14 @@ def handle_admin_text(bot, message):
                 if exist:
                     exist.quantity += qty
                     msg = f"✅ Товар пополнен! Остаток: {exist.quantity}"
+                    # LOG
+                    log_admin_action(user_id, "Пополнение (сущ)", f"{exist.item_name}: +{qty} шт.")
                 else:
                     new_item = Storage(category=category, item_name=name, quantity=qty, cost_price=cost)
                     session.add(new_item)
                     msg = f"✅ Товар создан! Остаток: {qty}"
+                    # LOG
+                    log_admin_action(user_id, "Создание товара", f"{name} (Кат: {category}, Цена: {cost}, Кол: {qty})")
             
             session.commit()
             reopen_admin_menu(bot, user_id, chat_id, text_prefix=msg)
@@ -429,8 +447,11 @@ def handle_admin_text(bot, message):
         elif state == ADM_EDIT_NAME_TXT:
             item = session.query(Storage).get(data.get('edit_id'))
             if item:
+                old_name = item.item_name
                 item.item_name = text
                 session.commit()
+                # LOG
+                log_admin_action(user_id, "Переименование товара", f"'{old_name}' -> '{text}'")
                 reopen_admin_menu(bot, user_id, chat_id, text_prefix=f"✅ Переименовано: {text}")
             return True
 
@@ -439,8 +460,11 @@ def handle_admin_text(bot, message):
                 cost = parse_cost_price(text)
                 item = session.query(Storage).get(data.get('edit_id'))
                 if item:
+                    old_cost = item.cost_price
                     item.cost_price = cost
                     session.commit()
+                    # LOG
+                    log_admin_action(user_id, "Изменение цены", f"{item.item_name}: {old_cost} -> {cost}")
                     reopen_admin_menu(bot, user_id, chat_id, text_prefix=f"✅ Цена обновлена: {cost}")
                 return True
             except: return True
@@ -449,6 +473,8 @@ def handle_admin_text(bot, message):
             old = data.get('old_cat_name')
             session.query(Storage).filter(Storage.category == old).update({Storage.category: text}, synchronize_session=False)
             session.commit()
+            # LOG
+            log_admin_action(user_id, "Переименование категории", f"'{old}' -> '{text}'")
             reopen_admin_menu(bot, user_id, chat_id, text_prefix=f"✅ Категория: {text}")
             return True
 

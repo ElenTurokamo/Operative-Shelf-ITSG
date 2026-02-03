@@ -6,6 +6,8 @@ from config import BOT_TOKEN, GROUP_ID, DB_URL
 from models import Base, User, Storage, Request
 # Импортируем функции админки
 from group import start_add_process, start_edit_process, handle_admin_text, handle_admin_callback
+# Импортируем логгер
+from excel_logger import log_user_action, log_admin_action
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -171,17 +173,14 @@ def cmd_start(message):
 
 @bot.message_handler(commands=['add', 'add_item'])
 def cmd_add_item(message):
-    # Разрешаем только в админ-группе (или ЛС админа, если нужно)
-    # АДМИНКА: отключена проверка группы для тестов
+    # АДМИНКА: проверка группы отключена для тестов
     if str(message.chat.id) != str(GROUP_ID):
-       # bot.reply_to(message, "Команда доступна только администраторам.")
        return
     start_add_process(bot, message)
     
 @bot.message_handler(commands=['edit', 'change'])
 def cmd_edit_item(message):
-    # Разрешаем только в админ-группе
-    # АДМИНКА: отключена проверка группы для тестов
+    # АДМИНКА: проверка группы отключена для тестов
     if str(message.chat.id) != str(GROUP_ID):
        return
     start_edit_process(bot, message)
@@ -230,6 +229,10 @@ def handle_text(message):
             msg = bot.send_message(chat_id, "✅ Регистрация успешна!", reply_markup=kb_categories(session))
             new_user.last_msg_id = msg.message_id
             session.commit()
+            
+            # LOG
+            log_user_action(new_user, "Регистрация", status="Success")
+            
             user_data[chat_id] = {} 
         except Exception as e:
             bot.send_message(chat_id, "Ошибка регистрации. /start")
@@ -303,8 +306,7 @@ def handle_all_callbacks(call):
     data = call.data
     session = get_db_session()
 
-    # АДМИНКА
-    # Админские кнопки: adm_ (навигация), edt_ (редактирование), conf_ (удаление)
+    # АДМИНКА (Раскомментировано)
     if data.startswith("adm_") or data.startswith("edt_") or data.startswith("conf_"):
         handle_admin_callback(bot, call)
         session.close()
@@ -323,6 +325,7 @@ def handle_all_callbacks(call):
 
         user = req.user
         item = req.item
+        admin_id = call.from_user.id
         
         notification_text = ""
 
@@ -331,6 +334,10 @@ def handle_all_callbacks(call):
                 item.quantity -= req.req_count
                 req.is_approved = True
                 req.status = 'approved'
+                
+                # LOG
+                log_admin_action(admin_id, "Одобрение заявки", f"Заявка #{req.id}, Товар: {item.item_name}, Кол-во: {req.req_count}")
+                log_user_action(user, "Заявка обновлена", item.item_name, req.req_count, req.comment, "Approved")
                 
                 notification_text = f"✅ Ваша заявка #{req.id} на **{item.item_name}** одобрена! Можете забирать."
                 
@@ -345,6 +352,10 @@ def handle_all_callbacks(call):
         elif action == "req_rej":
             req.is_approved = False
             req.status = 'rejected'
+            
+            # LOG
+            log_admin_action(admin_id, "Отказ заявки", f"Заявка #{req.id}")
+            log_user_action(user, "Заявка обновлена", item.item_name, req.req_count, req.comment, "Rejected")
             
             notification_text = f"⛔ Ваша заявка #{req.id} на **{item.item_name}** отклонена."
             
@@ -408,7 +419,7 @@ def handle_all_callbacks(call):
             message_id=call.message.message_id,
             text=text_msg,
             parse_mode="Markdown",
-            reply_markup=kb_cancel_only() # Кнопка отмены
+            reply_markup=kb_cancel_only()
         )
 
     elif data == "confirm_order":
@@ -433,6 +444,9 @@ def handle_all_callbacks(call):
         )
         session.add(new_req)
         session.commit()
+        
+        # LOG
+        log_user_action(user, "Новая заявка", item.item_name, qty, comment, "Pending")
 
         success_text = f"✅ **Заявка #{new_req.id} отправлена!**\n\nНужно заказать что-то ещё? Выберите категорию:"
         bot.edit_message_text(
