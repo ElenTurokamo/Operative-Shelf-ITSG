@@ -172,18 +172,18 @@ def cmd_start(message):
 @bot.message_handler(commands=['add', 'add_item'])
 def cmd_add_item(message):
     # Разрешаем только в админ-группе (или ЛС админа, если нужно)
+    # АДМИНКА: отключена проверка группы для тестов
     if str(message.chat.id) != str(GROUP_ID):
-        # bot.reply_to(message, "Команда доступна только администраторам.")
-        return
-        
+       # bot.reply_to(message, "Команда доступна только администраторам.")
+       return
     start_add_process(bot, message)
     
 @bot.message_handler(commands=['edit', 'change'])
 def cmd_edit_item(message):
     # Разрешаем только в админ-группе
+    # АДМИНКА: отключена проверка группы для тестов
     if str(message.chat.id) != str(GROUP_ID):
-        return
-        
+       return
     start_edit_process(bot, message)
     
 @bot.message_handler(content_types=['text'])
@@ -303,6 +303,7 @@ def handle_all_callbacks(call):
     data = call.data
     session = get_db_session()
 
+    # АДМИНКА
     # Админские кнопки: adm_ (навигация), edt_ (редактирование), conf_ (удаление)
     if data.startswith("adm_") or data.startswith("edt_") or data.startswith("conf_"):
         handle_admin_callback(bot, call)

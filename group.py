@@ -57,39 +57,32 @@ def reopen_admin_menu(bot, user_id, chat_id, text_prefix=""):
     """
     session = get_db_session()
     
-    # Восстанавливаем режим или ставим дефолтный 'add'
     current_data = ADMIN_STATES.get(user_id, {})
     mode = current_data.get('mode', 'add')
     
-    # Полная перезапись состояния
     ADMIN_STATES[user_id] = {
         'state': ADM_WAIT_CAT,
         'mode': mode,
         'data': {} 
     }
-    
-    header = "📦 **Пополнение склада (/add)**" if mode == 'add' else "🛠 **Редактор товаров (/edit)**"
+    header = "📦 Пополнение склада (/add)" if mode == 'add' else "🛠 Редактор товаров (/edit)"
     
     cleanup_last_msg(bot, user_id, chat_id)
     
-    # 1. Если есть уведомление, отправляем его отдельно (чтобы не сломать разметку меню)
     if text_prefix:
         try:
             bot.send_message(chat_id, text_prefix)
         except: 
             pass
 
-    # 2. Отправляем само меню
     try:
         msg = bot.send_message(
             chat_id, 
             f"{header}\nВыберите категорию:", 
-            reply_markup=kb_admin_categories(session), 
-            parse_mode="Markdown"
+            reply_markup=kb_admin_categories(session)
         )
         ADMIN_STATES[user_id]['last_msg_id'] = msg.message_id
     except Exception as e:
-        # Fallback без markdown
         try:
             msg = bot.send_message(chat_id, f"{header}\nВыберите категорию:", reply_markup=kb_admin_categories(session))
             ADMIN_STATES[user_id]['last_msg_id'] = msg.message_id
@@ -286,10 +279,11 @@ def handle_admin_callback(bot, call):
             item_id = int(data.split(":")[1])
             item = session.query(Storage).get(item_id)
             ADMIN_STATES[user_id]['state'] = ADM_CONFIRM_DEL
+            
+            # УБРАЛИ parse_mode="Markdown" и звездочки
             bot.edit_message_text(
-                f"⚠️ Удалить товар **{item.item_name}**?", 
+                f"⚠️ Удалить товар '{item.item_name}'?", 
                 chat_id, call.message.message_id, 
-                parse_mode="Markdown", 
                 reply_markup=kb_confirm_delete('item', item_id)
             )
             return
@@ -298,10 +292,11 @@ def handle_admin_callback(bot, call):
             cat_name = data.split(":", 1)[1]
             ADMIN_STATES[user_id]['state'] = ADM_CONFIRM_DEL
             count = session.query(Storage).filter_by(category=cat_name).count()
+            
+            # УБРАЛИ parse_mode="Markdown" и звездочки
             bot.edit_message_text(
-                f"⛔️ Удалить категорию **{cat_name}** и ВСЕ её товары ({count} шт)?", 
+                f"⛔️ Удалить категорию '{cat_name}' и ВСЕ её товары ({count} шт)?", 
                 chat_id, call.message.message_id, 
-                parse_mode="Markdown", 
                 reply_markup=kb_confirm_delete('cat', cat_name)
             )
             return
