@@ -10,6 +10,7 @@ COPY config.py /app/config.py
 COPY models.py /app/models.py
 COPY create_db.py /app/create_db.py
 COPY group.py /app/group.py
+COPY excel_logger.py /app/excel_logger.py
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
